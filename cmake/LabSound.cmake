@@ -122,7 +122,9 @@ target_include_directories(LabSound PRIVATE
     ${LABSOUND_ROOT}/src
     ${LABSOUND_ROOT}/src/internal
     ${LABSOUND_ROOT}/third_party
-    ${LABSOUND_ROOT}/third_party/libnyquist/include)
+    ${LABSOUND_ROOT}/third_party/libnyquist/include
+    ${LABSOUND_ROOT}/third_party/soundtouch/include
+    )
 
 if (MSVC_IDE)
     # hack to get around the "Debug" and "Release" directories cmake tries to add on Windows
@@ -161,6 +163,7 @@ endif()
 target_link_libraries(LabSound
     libnyquist libwavpack
     samplerate
+    soundtouch
     ${LABSOUND_PLATFORM_LINK_LIBRARIES})
 
 install(TARGETS LabSound

@@ -4,7 +4,7 @@
 
 /// @TODO allow for reversed playback
 
-#include "LabSound/core/SampledAudioNode.h"
+#include "LabSound/core/SoundTouchNode.h"
 
 #include "LabSound/core/AudioContext.h"
 #include "LabSound/core/AudioNodeOutput.h"
@@ -17,6 +17,9 @@
 
 #include "concurrentqueue/concurrentqueue.h"
 #include "libsamplerate/include/samplerate.h"
+
+#include "libnyquist/Decoders.h"
+
 
 using namespace lab;
 
@@ -48,7 +51,7 @@ namespace lab {
     };
 
 
-    struct SampledAudioNode::Scheduled
+    struct SoundTouchNode::Scheduled
     {
         double when;          // in context temporal frame
         int32_t grain_start;  // in source bus temporal frame
@@ -59,7 +62,7 @@ namespace lab {
         std::vector<std::shared_ptr<SRC_Resampler>> resampler; // there is one resampler per source channel
     };
 
-    struct SampledAudioNode::Internals
+    struct SoundTouchNode::Internals
     {
         ~Internals() = default;
         moodycamel::ConcurrentQueue<Scheduled> incoming;
@@ -67,7 +70,7 @@ namespace lab {
         int32_t greatest_cursor = -1;
     };
 
-    SampledAudioNode::SampledAudioNode(AudioContext& ac)
+    SoundTouchNode::SoundTouchNode(AudioContext& ac)
         : AudioScheduledSourceNode(ac), _internals(new Internals())
     {
         m_sourceBus = std::make_shared<AudioSetting>("sourceBus", "SBUS", AudioSetting::Type::Bus);
@@ -85,16 +88,22 @@ namespace lab {
         // Default to a single stereo output, per ABSN. A call to setBus() will set the number of output channels to that of the bus.
         addOutput(std::unique_ptr<AudioNodeOutput>(new AudioNodeOutput(this, 2)));
 
+        m_soundTouch = std::make_shared<soundtouch::SoundTouch>();
+
+        bufferSize = ceil(ProcessingSizeInFrames*2*3);
+        soundTouchBuffer = new float[bufferSize];
+
         if (s_registered)
             initialize();
     }
 
-    bool SampledAudioNode::s_registered = NodeRegistry::Register(SampledAudioNode::static_name(),
-        [](AudioContext& ac)->AudioNode* { return new SampledAudioNode(ac); },
+    bool SoundTouchNode::s_registered = NodeRegistry::Register(SoundTouchNode::static_name(),
+        [](AudioContext& ac)->AudioNode* { return new SoundTouchNode(ac); },
         [](AudioNode* n) { delete n; });
 
-    SampledAudioNode::~SampledAudioNode()
+    SoundTouchNode::~SoundTouchNode()
     {
+        delete soundTouchBuffer;
         clearSchedules();
         delete _internals;
 
@@ -102,26 +111,29 @@ namespace lab {
             uninitialize();
     }
 
-    void SampledAudioNode::clearSchedules()
+    void SoundTouchNode::clearSchedules()
     {
         Scheduled s;
         while (_internals->incoming.try_dequeue(s)) {}
         _internals->incoming.enqueue({ 0., 0,0,0, -2 });
     }
 
-    void SampledAudioNode::setBus(ContextRenderLock& r, std::shared_ptr<AudioBus> sourceBus)
+    void SoundTouchNode::setBus(ContextRenderLock& r, std::shared_ptr<AudioBus> sourceBus)
     {
         // loop count of -3 means set the bus.
         _internals->incoming.enqueue({ 0, 0, 0, 0, -3, sourceBus });
         initialize();
 
+        m_soundTouch->setSampleRate(sourceBus->sampleRate());
+        printf("sourceBus->numberOfChannels() -> %d \n", sourceBus->numberOfChannels());
+        m_soundTouch->setChannels(sourceBus->numberOfChannels());
         // set the pending pointer, so that a synchronous call to getBus will reflect
         // the value last scheduled. This eliminates a confusing sitatuion where getBus
         // will not be useful until the scheduling queue is serviced
         m_pendingSourceBus = sourceBus;
     }
 
-    void SampledAudioNode::schedule(double when)
+    void SoundTouchNode::schedule(double when)
     {
         std::shared_ptr<AudioBus> bus = m_pendingSourceBus;
         if (!bus)
@@ -134,7 +146,7 @@ namespace lab {
         initialize();
     }
 
-    void SampledAudioNode::schedule(double when, int loopCount)
+    void SoundTouchNode::schedule(double when, int loopCount)
     {
         std::shared_ptr<AudioBus> bus = m_pendingSourceBus;
         if (!bus)
@@ -147,7 +159,7 @@ namespace lab {
         initialize();
     }
 
-    void SampledAudioNode::schedule(double when, double grainOffset, int loopCount)
+    void SoundTouchNode::schedule(double when, double grainOffset, int loopCount)
     {
         std::shared_ptr<AudioBus> bus = m_pendingSourceBus;
         if (!bus)
@@ -169,7 +181,7 @@ namespace lab {
         initialize();
     }
 
-    void SampledAudioNode::schedule(double when, double grainOffset, double grainDuration, int loopCount)
+    void SoundTouchNode::schedule(double when, double grainOffset, double grainDuration, int loopCount)
     {
         std::shared_ptr<AudioBus> bus = m_pendingSourceBus;
         if (!bus)
@@ -193,8 +205,11 @@ namespace lab {
         initialize();
     }
 
-    bool SampledAudioNode::renderSample(ContextRenderLock& r, Scheduled& schedule, size_t destinationSampleOffset, size_t frameSize)
+    bool SoundTouchNode::renderSample(ContextRenderLock& r, Scheduled& schedule, size_t destinationSampleOffset, size_t frameSize)
     {
+
+        // printf("schedule.cursor: %d \n", schedule.cursor);
+
         std::shared_ptr<AudioBus> srcBus = m_sourceBus->valueBus();
         AudioBus* dstBus = output(0)->bus(r);
         size_t dstChannelCount = dstBus->numberOfChannels();
@@ -273,9 +288,14 @@ namespace lab {
 
                     int src_increment = 0;
                     int dst_increment = 0;
+
+                    // printf("%s", soundTouchBuffer);
                     for (int i = 0; i < srcChannelCount; ++i)
                     {
                         SRC_DATA* src_data = &schedule.resampler[i]->data;
+
+                        // m_soundTouch->putSamples(soundTouchBuffer, samples);
+
                         float* buffer = dstBus->channel(i)->mutableData();
                         src_data->data_in = srcBus->channel(i)->data() + schedule.cursor;
                         src_data->input_frames = remainder;
@@ -285,10 +305,12 @@ namespace lab {
                         src_data->src_ratio = 1. / rate;
                         src_data->end_of_input = ending ? 1 : 0;
                         src_process(schedule.resampler[i]->sampler, src_data);
+
                         VectorMath::vadd(buff.data(), 1, buffer + write_index, 1, buffer + write_index, 1, count);
                         src_increment = src_data->input_frames_used;
                         dst_increment = src_data->output_frames_gen;
                     }
+
                     schedule.cursor += src_increment;
                     write_index += dst_increment;
 
@@ -314,13 +336,21 @@ namespace lab {
             }
         }
 
+        float pRate = playbackRate()->value();
+        if (pRate != 1.0) {
+            m_soundTouch->setPitch( 1.0 / pRate );
+            mixChannel(dstBus, AudioNode::ProcessingSizeInFrames - destinationSampleOffset);
+            soundTouchRender(dstBus);
+        }
+
+   
         //r.context()->appendDebugBuffer(dstBus, 0, AudioNode::ProcessingSizeInFrames);
         dstBus->clearSilentFlag();
         return true;
     }
 
 
-    void SampledAudioNode::process(ContextRenderLock& r, int framesToProcess)
+    void SoundTouchNode::process(ContextRenderLock& r, int framesToProcess)
     {
         _internals->greatest_cursor = -1;
 
@@ -385,6 +415,7 @@ namespace lab {
                 int32_t offset = (s.when < quantumStartTime) ? 0 : static_cast<int32_t>(s.when * r.context()->sampleRate());
                 if (offset > _internals->greatest_cursor)
                     _internals->greatest_cursor = offset;
+
                 renderSample(r, s, (size_t) offset, AudioNode::ProcessingSizeInFrames);
                 output(0)->bus(r)->clearSilentFlag();
             }
@@ -416,7 +447,7 @@ namespace lab {
         }
     }
 
-    int32_t SampledAudioNode::getCursor() const
+    int32_t SoundTouchNode::getCursor() const
     {
         return _internals->greatest_cursor;
     }
@@ -425,8 +456,8 @@ namespace lab {
     /// @TODO change the interface:
     /// // if true is returned, rate_array[0] applies to the entire quantum
     /// // if the computed total rate has any illegal values, true will be returned, and a default rate of 1.f
-    /// bool SampledAudioNode::totalPitchRate(ContextRenderLock& r, float*& rate);
-    float SampledAudioNode::totalPitchRate(ContextRenderLock& r)
+    /// bool SoundTouchNode::totalPitchRate(ContextRenderLock& r, float*& rate);
+    float SoundTouchNode::totalPitchRate(ContextRenderLock& r)
     {
         std::shared_ptr<AudioBus> srcBus = m_sourceBus->valueBus();
 
@@ -439,6 +470,7 @@ namespace lab {
         /// @fixme these values should be per sample, not per quantum
         /// -or- they should be settings if they don't vary per sample
         double basePitchRate = playbackRate()->value();
+        // m_soundTouch->setPitch(basePitchRate);
 
         /// @fixme these values should be per sample, not per quantum
         double totalRate = m_dopplerRate->value() * sampleRateFactor * basePitchRate;
@@ -458,5 +490,65 @@ namespace lab {
 
         return (float) totalRate;
     }
+
+
+    void SoundTouchNode::setRate(double value) {
+        // playbackRate()->setValue(value);
+        // m_soundTouch->setPitch(1.0/value);
+    }
+
+    void SoundTouchNode::setPitch(double value) {
+        m_soundTouch->setPitchSemiTones(value);
+    }
+
+    void SoundTouchNode::setTempo(double value) {
+        m_soundTouch->setTempo(value);
+    }
+
+
+template <typename T>
+void interleaveStereo(T const * c1, T const * c2, T * dst, size_t count)
+{
+    auto dst_end = dst + count*2;
+    while (dst != dst_end)
+    {
+        dst[0] = *c1;
+        dst[1] = *c2;
+        c1++;
+        c2++;
+        dst += 2;
+    }
+}
+
+void SoundTouchNode::mixChannel(AudioBus *srcBus,int samples) {
+    if(srcBus->numberOfChannels()==2){
+        interleaveStereo(srcBus->channel(0)->data(),srcBus->channel(1)->data(),soundTouchBuffer,samples);
+    }else{
+        memcpy(srcBus->channel(0)->mutableData(),soundTouchBuffer,samples*sizeof(float));
+    }
+    // 将音频提交给SoundTouch处理进程
+    m_soundTouch->putSamples(soundTouchBuffer, samples);
+}
+
+void SoundTouchNode::soundTouchRender(AudioBus *outputBus) {
+    uint nSamples = ProcessingSizeInFrames;
+    int received = 0,got = 0;
+
+    memset(soundTouchBuffer,0,bufferSize);
+    do{
+        got = m_soundTouch->receiveSamples((soundTouchBuffer+received), nSamples-received);
+        received += got;
+    } while (got != 0);
+
+//    __android_log_print(ANDROID_LOG_ERROR,"ST","%s%d","Received:",received);
+
+    if(outputBus->numberOfChannels() == 2){
+        nqr::DeinterleaveStereo(outputBus->channel(0)->mutableData(),outputBus->channel(1)->mutableData(),soundTouchBuffer,received * 2);
+    }else{
+        memcpy(outputBus->channel(0)->mutableData(),soundTouchBuffer,nSamples*sizeof(float));
+    }
+}
+
+
 
 } // namespace lab

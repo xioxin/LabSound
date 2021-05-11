@@ -29,6 +29,7 @@
 #include "LabSound/core/OscillatorNode.h"
 #include "LabSound/core/PannerNode.h"
 #include "LabSound/core/SampledAudioNode.h"
+#include "LabSound/core/SoundTouchNode.h"
 #include "LabSound/core/StereoPannerNode.h"
 #include "LabSound/core/WaveShaperNode.h"
 

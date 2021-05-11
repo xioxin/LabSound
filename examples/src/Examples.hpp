@@ -63,39 +63,27 @@ struct ex_simple : public labsound_example
         context = lab::MakeRealtimeAudioContext(defaultAudioDeviceConfigurations.second, defaultAudioDeviceConfigurations.first);
         lab::AudioContext& ac = *context.get();
 
-        auto musicClip = MakeBusFromSampleFile("samples/stereo-music-clip.wav", argc, argv);
+
+        auto musicClip = MakeBusFromSampleFile("samples/music.mp3", argc, argv);
         if (!musicClip)
             return;
 
-        std::shared_ptr<OscillatorNode> oscillator;
-        std::shared_ptr<SampledAudioNode> musicClipNode;
-        std::shared_ptr<GainNode> gain;
-
-        oscillator = std::make_shared<OscillatorNode>(ac);
-        gain = std::make_shared<GainNode>(ac);
-        gain->gain()->setValue(0.5f);
-
-        musicClipNode = std::make_shared<SampledAudioNode>(ac);
+        printf("ac.sampleRate: %f \n", ac.sampleRate());
+        printf("musicClip->sampleRate: %f \n", musicClip->sampleRate());
+        std::shared_ptr<SoundTouchNode> musicClipNode;
+        musicClipNode = std::make_shared<SoundTouchNode>(ac);
         {
             ContextRenderLock r(context.get(), "ex_simple");
             musicClipNode->setBus(r, musicClip);
         }
         context->connect(context->device(), musicClipNode, 0, 0);
+        musicClipNode->playbackRate()->setValue(0.5);
+        musicClipNode->playbackRate()->setValueAtTime(0.5, ac.currentTime() + 1.0);
+        musicClipNode->playbackRate()->linearRampToValueAtTime(1.0, ac.currentTime() + 5.0);
         musicClipNode->schedule(0.0);
-
-        // osc -> gain -> destination
-        context->connect(gain, oscillator, 0, 0);
-        context->connect(context->device(), gain, 0, 0);
-
-        oscillator->frequency()->setValue(440.f);
-        oscillator->setType(OscillatorType::SINE);
-        oscillator->start(0.0f);
-
-        _nodes.push_back(oscillator);
         _nodes.push_back(musicClipNode);
-        _nodes.push_back(gain);
 
-        Wait(std::chrono::seconds(6));
+        Wait(std::chrono::seconds(10));
     }
 };
 
