@@ -37,10 +37,10 @@ namespace
 {
     ma_context g_context;
     static std::vector<AudioDeviceInfo> g_devices;
+    static bool g_must_init = true;
 
     void init_context()
     {
-        static bool g_must_init = true;
         if (g_must_init)
         {
             LOG_TRACE("[LabSound] init_context() must_init");
@@ -72,12 +72,12 @@ void PrintAudioDeviceList()
 
 std::vector<AudioDeviceInfo> AudioDevice::MakeAudioDeviceList()
 {
+    init_context();
     static bool probed = false;
     if (probed)
         return g_devices;
 
     probed = true;
-    init_context();
 
     ma_result result;
     ma_device_info * pPlaybackDeviceInfos;
@@ -210,6 +210,8 @@ AudioDevice_Miniaudio::AudioDevice_Miniaudio(AudioDeviceRenderCallback & callbac
 
     authoritativeDeviceSampleRateAtRuntime = outputConfig.desired_samplerate;
 
+    samplingInfo.epoch[0] = samplingInfo.epoch[1] = std::chrono::high_resolution_clock::now();
+
     _ring = new cinder::RingBufferT<float>();
     _ring->resize(static_cast<int>(authoritativeDeviceSampleRateAtRuntime));  // ad hoc. hold one second
     _scratch = reinterpret_cast<float *>(malloc(sizeof(float) * kRenderQuantum * inputConfig.desired_channels));
@@ -220,6 +222,7 @@ AudioDevice_Miniaudio::~AudioDevice_Miniaudio()
     stop();
     ma_device_uninit(&_device);
     ma_context_uninit(&g_context);
+    g_must_init = true;
     delete _renderBus;
     delete _inputBus;
     delete _ring;
@@ -227,10 +230,37 @@ AudioDevice_Miniaudio::~AudioDevice_Miniaudio()
         free(_scratch);
 }
 
+void AudioDevice_Miniaudio::backendReinitialize()
+{
+    auto device_list = AudioDevice::MakeAudioDeviceList();
+    PrintAudioDeviceList();
+
+    //ma_device_config deviceConfig = ma_device_config_init(ma_device_type_duplex);
+    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
+    deviceConfig.playback.format = ma_format_f32;
+    deviceConfig.playback.channels = outputConfig.desired_channels;
+    deviceConfig.sampleRate = static_cast<int>(outputConfig.desired_samplerate);
+    deviceConfig.capture.format = ma_format_f32;
+    deviceConfig.capture.channels = inputConfig.desired_channels;
+    deviceConfig.dataCallback = outputCallback;
+    deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+    deviceConfig.pUserData = this;
+
+#ifdef __WINDOWS_WASAPI__
+    deviceConfig.wasapi.noAutoConvertSRC = true;
+#endif
+
+    if (ma_device_init(&g_context, &deviceConfig, &_device) != MA_SUCCESS)
+    {
+        LOG_ERROR("Unable to open audio playback device");
+        return;
+    }
+}
+
+
 void AudioDevice_Miniaudio::start()
 {
     ASSERT(authoritativeDeviceSampleRateAtRuntime != 0.f);  // something went very wrong
-    samplingInfo.epoch[0] = samplingInfo.epoch[1] = std::chrono::high_resolution_clock::now();
     if (ma_device_start(&_device) != MA_SUCCESS)
     {
         LOG_ERROR("Unable to start audio device");
@@ -243,8 +273,13 @@ void AudioDevice_Miniaudio::stop()
     {
         LOG_ERROR("Unable to stop audio device");
     }
-    samplingInfo = {};
 }
+
+bool AudioDevice_Miniaudio::isRunning() const
+{
+    return ma_device_is_started(&_device);
+}
+
 
 // Pulls on our provider to get rendered audio stream.
 void AudioDevice_Miniaudio::render(int numberOfFrames_, void * outputBuffer, void * inputBuffer)

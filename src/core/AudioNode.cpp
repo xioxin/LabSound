@@ -127,6 +127,8 @@ bool AudioNodeScheduler::update(ContextRenderLock & r, int epoch_length)
                 // scheduled stop has occured, so make sure stop doesn't immediately trigger again
                 _stopWhen = std::numeric_limits<uint64_t>::max();
                 _playbackState = SchedulingState::UNSCHEDULED;
+                if(_onEnded)
+                    r.context()->enqueueEvent(_onEnded);
                 ASN_PRINT("unscheduled\n");
             }
             break;
@@ -155,6 +157,7 @@ void AudioNodeScheduler::start(double when)
         _playbackState == SchedulingState::PLAYING)
         return;
 
+    // start cancels stop
     _stopWhen = std::numeric_limits<uint64_t>::max();
 
     // treat non finite, or max values as a cancellation of stopping or resetting

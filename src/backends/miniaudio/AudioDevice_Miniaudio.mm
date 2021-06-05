@@ -37,10 +37,10 @@ namespace
 {
     ma_context g_context;
     static std::vector<AudioDeviceInfo> g_devices;
+    static bool g_must_init = true;
 
     void init_context()
     {
-        static bool g_must_init = true;
         if (g_must_init)
         {
             LOG_TRACE("[LabSound] init_context() must_init");
@@ -72,12 +72,12 @@ void PrintAudioDeviceList()
 
 std::vector<AudioDeviceInfo> AudioDevice::MakeAudioDeviceList()
 {
+    init_context();
     static bool probed = false;
     if (probed)
         return g_devices;
 
     probed = true;
-    init_context();
 
     ma_result result;
     ma_device_info * pPlaybackDeviceInfos;
@@ -220,12 +220,41 @@ AudioDevice_Miniaudio::~AudioDevice_Miniaudio()
     stop();
     ma_device_uninit(&_device);
     ma_context_uninit(&g_context);
+    g_must_init = true;
     delete _renderBus;
     delete _inputBus;
     delete _ring;
     if (_scratch)
         free(_scratch);
 }
+
+void AudioDevice_Miniaudio::backendReinitialize()
+{
+    auto device_list = AudioDevice::MakeAudioDeviceList();
+    PrintAudioDeviceList();
+
+    //ma_device_config deviceConfig = ma_device_config_init(ma_device_type_duplex);
+    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
+    deviceConfig.playback.format = ma_format_f32;
+    deviceConfig.playback.channels = outputConfig.desired_channels;
+    deviceConfig.sampleRate = static_cast<int>(outputConfig.desired_samplerate);
+    deviceConfig.capture.format = ma_format_f32;
+    deviceConfig.capture.channels = inputConfig.desired_channels;
+    deviceConfig.dataCallback = outputCallback;
+    deviceConfig.performanceProfile = ma_performance_profile_low_latency;
+    deviceConfig.pUserData = this;
+
+#ifdef __WINDOWS_WASAPI__
+    deviceConfig.wasapi.noAutoConvertSRC = true;
+#endif
+
+    if (ma_device_init(&g_context, &deviceConfig, &_device) != MA_SUCCESS)
+    {
+        LOG_ERROR("Unable to open audio playback device");
+        return;
+    }
+}
+
 
 void AudioDevice_Miniaudio::start()
 {
