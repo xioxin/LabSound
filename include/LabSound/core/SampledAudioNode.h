@@ -9,6 +9,8 @@
 
 #include <memory>
 
+#include "SoundTouch.h"
+
 
 namespace lab
 {
@@ -52,6 +54,13 @@ class SampledAudioNode final : public AudioScheduledSourceNode
 
     virtual void process(ContextRenderLock&, int framesToProcess) override;
     static bool s_registered;
+
+    uint bufferSize;
+    float* soundTouchBuffer;
+    std::shared_ptr<soundtouch::SoundTouch> m_soundTouch;
+
+    void soundTouchRender(AudioBus* outputBus);
+    void mixChannel(AudioBus *srcBus,int samples);
 
 public:
     SampledAudioNode() = delete;

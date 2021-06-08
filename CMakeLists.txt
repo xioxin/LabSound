@@ -31,6 +31,7 @@ set(CMAKE_CXX_STANDARD 14)
 # turn off building libnyquist samples
 set(BUILD_EXAMPLE OFF)
 add_subdirectory(third_party/libnyquist)
+add_subdirectory(third_party/soundtouch)
 
 include(cmake/common.cmake)
 include(cmake/LabSound.cmake)

@@ -18,6 +18,8 @@
 #include "concurrentqueue/concurrentqueue.h"
 #include "libsamplerate/include/samplerate.h"
 
+#include "libnyquist/Decoders.h"
+
 using namespace lab;
 
 namespace lab {
@@ -91,6 +93,10 @@ namespace lab {
         // Default to a single stereo output, per ABSN. A call to setBus() will set the number of output channels to that of the bus.
         addOutput(std::unique_ptr<AudioNodeOutput>(new AudioNodeOutput(this, 2)));
 
+        m_soundTouch = std::make_shared<soundtouch::SoundTouch>();
+        bufferSize = ceil(ProcessingSizeInFrames*2*3);
+        soundTouchBuffer = new float[bufferSize];
+
         if (s_registered)
             initialize();
     }
@@ -101,6 +107,7 @@ namespace lab {
 
     SampledAudioNode::~SampledAudioNode()
     {
+        delete soundTouchBuffer;
         clearSchedules();
         delete _internals;
 
@@ -120,6 +127,9 @@ namespace lab {
         // loop count of -3 means set the bus.
         _internals->incoming.enqueue({ 0, 0, 0, 0, -3, sourceBus });
         initialize();
+
+        m_soundTouch->setSampleRate(sourceBus->sampleRate());
+        m_soundTouch->setChannels(sourceBus->numberOfChannels());
 
         // set the pending pointer, so that a synchronous call to getBus will reflect
         // the value last scheduled. This eliminates a confusing sitatuion where getBus
@@ -413,11 +423,17 @@ namespace lab {
             }
         }
 
+        float pRate = playbackRate()->value();
+        if (pRate != 1.0) {
+            m_soundTouch->setPitch( 1. / pRate );
+            mixChannel(dstBus, AudioNode::ProcessingSizeInFrames);
+            soundTouchRender(dstBus);
+        }
+
         //r.context()->appendDebugBuffer(dstBus, 0, AudioNode::ProcessingSizeInFrames);
         dstBus->clearSilentFlag();
         return true;
     }
-
 
     void SampledAudioNode::process(ContextRenderLock& r, int framesToProcess)
     {
@@ -436,6 +452,8 @@ namespace lab {
                 if (s.loopCount == -3)
                 {
                     m_retainedSourceBus = s.sourceBus;
+                    // m_soundTouch->setSampleRate(m_retainedSourceBus->sampleRate());
+                    // m_soundTouch->setChannels(m_retainedSourceBus->numberOfChannels());
                     m_sourceBus->setBus(s.sourceBus.get());
                     srcBus = s.sourceBus;
                 }
@@ -557,5 +575,47 @@ namespace lab {
 
         return (float) totalRate;
     }
+
+
+    template <typename T>
+    void interleaveStereo(T const * c1, T const * c2, T * dst, size_t count)
+    {
+        auto dst_end = dst + count*2;
+        while (dst != dst_end)
+        {
+            dst[0] = *c1;
+            dst[1] = *c2;
+            c1++;
+            c2++;
+            dst += 2;
+        }
+    }
+
+    void SampledAudioNode::mixChannel(AudioBus *srcBus,int samples) {
+        if(srcBus->numberOfChannels()==2){
+            interleaveStereo(srcBus->channel(0)->data(),srcBus->channel(1)->data(),soundTouchBuffer,samples);
+        }else{
+            memcpy(srcBus->channel(0)->mutableData(),soundTouchBuffer,samples*sizeof(float));
+        }
+        m_soundTouch->putSamples(soundTouchBuffer, samples);
+    }
+
+    void SampledAudioNode::soundTouchRender(AudioBus *outputBus) {
+        uint nSamples = ProcessingSizeInFrames;
+        int received = 0,got = 0;
+
+        memset(soundTouchBuffer,0,bufferSize);
+        do{
+            got = m_soundTouch->receiveSamples((soundTouchBuffer+received), nSamples-received);
+            received += got;
+        } while (got != 0);
+
+        if(outputBus->numberOfChannels() == 2){
+            nqr::DeinterleaveStereo(outputBus->channel(0)->mutableData(),outputBus->channel(1)->mutableData(),soundTouchBuffer,received * 2);
+        }else{
+            memcpy(outputBus->channel(0)->mutableData(),soundTouchBuffer,nSamples*sizeof(float));
+        }
+    }
+
 
 } // namespace lab
